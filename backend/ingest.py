@@ -9,15 +9,18 @@ import triage
 def ingest(channel_key, conv_key, conv_title, sender, ts, text, dedup_key):
     """入站一条消息。返回 (message, grp, event) 或 None（重复）。"""
     now = db.now_iso()
-    db.ex("INSERT OR IGNORE INTO messages(channel_key, conv_key, conv_title, "
-          "sender, ts, text, grp, dedup_key, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-          (channel_key, conv_key, conv_title, sender, ts, text, "", dedup_key, now))
+    inserted = db.ex("INSERT OR IGNORE INTO messages(channel_key, conv_key, conv_title, "
+                     "sender, ts, text, grp, dedup_key, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                     (channel_key, conv_key, conv_title, sender, ts, text, "", dedup_key, now))
+    if inserted == 0:
+        return None
     row = db.q("SELECT * FROM messages WHERE dedup_key=?", (dedup_key,))
     if not row:
         return None
     m = row[0]
     grp = triage.classify(m["text"], m["sender"])
     db.ex("UPDATE messages SET grp=? WHERE id=?", (grp, m["id"]))
+    m["grp"] = grp
 
     event = None
     if grp == "schedule":
