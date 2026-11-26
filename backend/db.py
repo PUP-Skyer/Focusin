@@ -70,8 +70,9 @@ def q(sql, args=()):
 
 def ex(sql, args=()):
     with closing(get_conn()) as c:
-        c.execute(sql, args)
+        cur = c.execute(sql, args)
         c.commit()
+        return cur.rowcount
 
 
 def init():
