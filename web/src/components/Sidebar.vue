@@ -39,6 +39,7 @@ function jumpTo(c) {
 
       <button :class="{ on: tab === 'calendar' }" @click="emit('select', 'calendar')">日历</button>
       <button :class="{ on: tab === 'chat' }" @click="emit('select', 'chat')">对话</button>
+      <button :class="{ on: tab === 'connectors' }" @click="emit('select', 'connectors')">渠道接入</button>
       <button :class="{ on: tab === 'settings' }" @click="emit('select', 'settings')">设置</button>
     </nav>
 

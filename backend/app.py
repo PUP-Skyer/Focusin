@@ -12,8 +12,10 @@ from fastapi.responses import StreamingResponse
 import pydantic
 
 import agent
+import connectors
 import db
 import dataset
+import ingest
 import triage
 
 app = FastAPI(title="聚光 FocusIn")
@@ -216,31 +218,87 @@ def inject(msg: InjectMsg):
                 "AND conv_key=?", (msg.channel, msg.conv))
     title = conv[0]["conv_title"] if conv else msg.conv
     dedup = f"inj:{msg.channel}:{msg.conv}:{now}:{msg.text[:12]}"
-    db.ex("INSERT OR IGNORE INTO messages(channel_key, conv_key, conv_title, "
-          "sender, ts, text, grp, dedup_key, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-          (msg.channel, msg.conv, title, msg.sender, now, msg.text, "", dedup, now))
-    row = db.q("SELECT * FROM messages WHERE dedup_key=?", (dedup,))
-    if not row:
+    r = ingest.ingest(msg.channel, msg.conv, title, msg.sender, now, msg.text, dedup)
+    if not r:
         return {"ok": False, "reason": "重复消息已去重"}
-    m = row[0]
-    grp = triage.classify(m["text"], m["sender"])
-    db.ex("UPDATE messages SET grp=? WHERE id=?", (grp, m["id"]))
-    event = None
-    if grp == "schedule":
-        dt = triage.parse_time(m["text"])
-        if dt:
-            db.ex("INSERT OR IGNORE INTO schedule_events(title, start_at, "
-                  "source_msg_id, status, dedup_key, created_at) "
-                  "VALUES(?,?,?,?,?,?)",
-                  (triage.event_title(m["text"]), dt.strftime("%Y-%m-%d %H:%M"),
-                   m["id"], "pending", f"msg:{m['id']}", now))
-            event = db.q("SELECT * FROM schedule_events WHERE source_msg_id=?",
-                         (m["id"],))[0]
-    elif grp == "todo":
-        db.ex("INSERT OR IGNORE INTO todos(text, source_msg_id, created_at) "
-              "VALUES(?,?,?)", (triage.event_title(m["text"]), m["id"], now))
+    m, grp, event = r
     return {"ok": True, "message": m, "grp": grp, "event": event,
             "grp_label": GROUP_LABEL.get(grp, grp)}
+
+
+# ---------------- 渠道接入（真实连接器）----------------
+
+@app.get("/api/connectors")
+def connector_catalog():
+    out = []
+    for key, c in connectors.CATALOG.items():
+        n_subs = db.q("SELECT COUNT(*) n FROM subscriptions WHERE channel_key=? "
+                      "AND active=1", (key,))[0]["n"]
+        out.append({"key": key, "name": c["name"], "kind": c["kind"],
+                    "ready": c["ready"], "desc": c["desc"], "fields": c["fields"],
+                    "configured": connectors.is_configured(key),
+                    "masked": connectors.masked_credentials(key),
+                    "subscriptions": n_subs})
+    return out
+
+
+class CredentialBody(pydantic.BaseModel):
+    fields: dict = {}
+
+
+@app.post("/api/connectors/{key}/credentials")
+def save_credentials(key: str, body: CredentialBody):
+    if key not in connectors.CATALOG or not connectors.CATALOG[key]["ready"]:
+        return {"ok": False, "error": "该渠道暂未开放接入"}
+    connectors.save_credentials(key, body.fields)
+    result = connectors.test(key)
+    return {**result, "masked": connectors.masked_credentials(key)}
+
+
+@app.post("/api/connectors/{key}/test")
+def test_connector(key: str):
+    return connectors.test(key)
+
+
+@app.post("/api/connectors/{key}/discover")
+def discover_conversations(key: str):
+    return connectors.discover(key)
+
+
+class SubBody(pydantic.BaseModel):
+    conv_key: str
+    conv_title: str = ""
+    on: bool = True
+
+
+@app.post("/api/connectors/{key}/subscribe")
+def subscribe(key: str, body: SubBody):
+    """订阅/退订唯一入口：只有 active=1 的会话会被同步，未勾选的绝不拉取。"""
+    if key not in connectors.CATALOG:
+        return {"ok": False}
+    if body.on:
+        db.ex("INSERT OR IGNORE INTO subscriptions(channel_key, conv_key, "
+              "conv_title, active, added_at) VALUES(?,?,?,1,?)",
+              (key, body.conv_key, body.conv_title, db.now_iso()))
+        db.ex("UPDATE subscriptions SET active=1, conv_title=? "
+              "WHERE channel_key=? AND conv_key=?",
+              (body.conv_title, key, body.conv_key))
+    else:
+        db.ex("UPDATE subscriptions SET active=0 WHERE channel_key=? AND conv_key=?",
+              (key, body.conv_key))
+    n = db.q("SELECT COUNT(*) n FROM subscriptions WHERE channel_key=? AND active=1",
+             (key,))[0]["n"]
+    return {"ok": True, "active": body.on, "subscriptions": n}
+
+
+@app.get("/api/subscriptions")
+def subscriptions():
+    return db.q("SELECT * FROM subscriptions ORDER BY active DESC, added_at DESC")
+
+
+@app.post("/api/connectors/{key}/sync")
+def sync_connector(key: str):
+    return connectors.sync(key)
 
 
 # ---------------- 其他 ----------------

@@ -6,6 +6,7 @@ import Overview from './pages/Overview.vue'
 import Messages from './pages/Messages.vue'
 import CalendarPage from './pages/CalendarPage.vue'
 import Chat from './pages/Chat.vue'
+import Connectors from './pages/Connectors.vue'
 import Settings from './pages/Settings.vue'
 import { get } from './api.js'
 
@@ -14,6 +15,7 @@ const TABS = [
   { key: 'messages', label: '消息流' },
   { key: 'calendar', label: '日历' },
   { key: 'chat', label: '对话' },
+  { key: 'connectors', label: '渠道接入' },
   { key: 'settings', label: '设置' }
 ]
 const tab = ref('overview')
@@ -40,7 +42,7 @@ async function pollNotif() {
 
 const page = computed(() => ({
   overview: Overview, messages: Messages, calendar: CalendarPage,
-  chat: Chat, settings: Settings
+  chat: Chat, connectors: Connectors, settings: Settings
 }[tab.value]))
 
 provide('gotoMessages', go)

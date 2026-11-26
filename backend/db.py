@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS drafts(
   id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, content TEXT, created_at TEXT);
 
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+
+CREATE TABLE IF NOT EXISTS subscriptions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_key TEXT NOT NULL, conv_key TEXT NOT NULL, conv_title TEXT,
+  active INTEGER DEFAULT 1, added_at TEXT,
+  UNIQUE(channel_key, conv_key));
 """
 
 
