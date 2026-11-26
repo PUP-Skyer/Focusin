@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Agent 执行层：工具注册表（schema + 风险分级）→ Sentinel 审批门 → 执行 → 流式回流。
 无 LLM Key 时由规则兜底路由驱动同样的工具链，Demo 闭环不依赖网络。"""
+import datetime
 import json
 import re
 import time
@@ -39,9 +40,6 @@ def t_search_messages(args):
     params = [f"%{t}%" for t in terms]
     rows = db.q(f"SELECT * FROM messages WHERE ({where}) AND grp != 'chatter' "
                 "ORDER BY ts DESC LIMIT 8", params)
-    if not rows:
-        rows = db.q("SELECT * FROM messages WHERE grp IN ('todo','schedule',"
-                    "'important','notice') ORDER BY ts DESC LIMIT 5")
     return "\n".join(_fmt_hit(m) for m in rows) or "（没有找到相关消息）"
 
 
@@ -63,7 +61,11 @@ def t_list_schedule(args):
 def t_create_schedule(args):
     title = (args.get("title") or "").strip()
     start_at = (args.get("start_at") or "").strip()
-    if not title or not re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", start_at):
+    if not title or not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", start_at):
+        return {"ok": False, "reason": "标题或时间格式不合法（需 YYYY-MM-DD HH:MM）"}
+    try:
+        datetime.datetime.strptime(start_at, "%Y-%m-%d %H:%M")
+    except ValueError:
         return {"ok": False, "reason": "标题或时间格式不合法（需 YYYY-MM-DD HH:MM）"}
     db.ex("INSERT OR IGNORE INTO schedule_events(title, start_at, status, "
           "dedup_key, created_at, source_msg_id) VALUES(?,?,?,?,?,NULL)",
@@ -194,7 +196,11 @@ def execute_tool(name, args, emit):
     if risk != "safe":
         ok, approval_id = request_approval(name, args, risk, emit)
         if not ok:
-            result = {"ok": False, "reason": "用户拒绝了该操作（宁拦勿纵）"}
+            status_row = db.q("SELECT status FROM approvals WHERE id=?", (approval_id,))
+            reason = ("审批超时，操作未执行（宁拦勿纵）"
+                      if status_row and status_row[0]["status"] == "timeout"
+                      else "用户拒绝了该操作（宁拦勿纵）")
+            result = {"ok": False, "reason": reason}
             emit({"type": "tool_end", "name": name, "ok": False,
                   "result": result["reason"]})
             audit(name, args, risk, approval_id, result)
@@ -238,14 +244,17 @@ def _flow_sync(user_text, emit):
     db.ex("INSERT INTO chat_messages(role, content, ts) VALUES(?,?,?)",
           ("user", user_text, db.now_iso()))
     full = []
-    try:
-        if llm.available():
+    if llm.available():
+        full_start = len(full)
+        try:
             _llm_flow(user_text, emit, full)
-        else:
+        except Exception as e:  # noqa: BLE001
+            del full[full_start:]
+            emit({"type": "fallback",
+                  "message": f"模型服务暂不可用（{e}），已切换到本地规则模式。"})
             _fallback_flow(user_text, emit, full)
-    except Exception as e:  # noqa: BLE001
-        emit({"type": "error", "message": str(e)})
-        full.append("\n（出错了，但我还在）")
+    else:
+        _fallback_flow(user_text, emit, full)
     answer = "".join(full).strip() or "（小聚走神了，再试一次？）"
     db.ex("INSERT INTO chat_messages(role, content, ts) VALUES(?,?,?)",
           ("assistant", answer, db.now_iso()))

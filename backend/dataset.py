@@ -3,6 +3,7 @@
 时间以“今天”为基准动态生成，保证任何一天打开 Demo 数据都是新鲜的。"""
 import random
 import datetime
+from contextlib import closing
 
 import db
 import triage
@@ -58,6 +59,7 @@ FILLERS = [
 
 def seed():
     db.reset()
+    rng = random.Random(20261126)
     now = datetime.datetime.now()
     rows = []
 
@@ -72,22 +74,22 @@ def seed():
         dt = (now + datetime.timedelta(days=day_off)).replace(
             hour=hh, minute=mm, second=0, microsecond=0)
         if day_off == 0 and dt > now:  # 今日消息必须已发生
-            dt = now - datetime.timedelta(minutes=random.randint(3, 30))
+            dt = now - datetime.timedelta(minutes=rng.randint(3, 30))
         add(ch, ck, conv_title[ck], sender, dt, text)
 
     for day_off in range(-6, 1):
-        n = random.randint(26, 34) if day_off == 0 else random.randint(22, 30)
+        n = rng.randint(26, 34) if day_off == 0 else rng.randint(22, 30)
         for _ in range(n):
-            ch, ck, title, members = random.choice(CONVS)
-            sender = random.choice(members)
+            ch, ck, title, members = rng.choice(CONVS)
+            sender = rng.choice(members)
             dt = (now + datetime.timedelta(days=day_off)).replace(
-                hour=random.randint(8, 22), minute=random.randint(0, 59),
+                hour=rng.randint(8, 22), minute=rng.randint(0, 59),
                 second=0, microsecond=0)
             if day_off == 0 and dt > now:
-                dt = now - datetime.timedelta(minutes=random.randint(1, 90))
-            add(ch, ck, title, sender, dt, random.choice(FILLERS))
+                dt = now - datetime.timedelta(minutes=rng.randint(1, 90))
+            add(ch, ck, title, sender, dt, rng.choice(FILLERS))
 
-    with db.get_conn() as c:
+    with closing(db.get_conn()) as c:
         for key, name, typ, _ in CHANNELS:
             c.execute("INSERT OR REPLACE INTO channels(key,name,type,status) "
                       "VALUES(?,?,?,'on')", (key, name, typ))

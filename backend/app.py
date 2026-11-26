@@ -16,6 +16,7 @@ import connectors
 import db
 import dataset
 import ingest
+import llm
 import triage
 
 app = FastAPI(title="聚光 FocusIn")
@@ -323,7 +324,8 @@ def notifications():
 def get_settings():
     return {"llm_base_url": db.get_setting("llm_base_url", ""),
             "llm_model": db.get_setting("llm_model", ""),
-            "has_key": bool(db.get_setting("llm_api_key", ""))}
+            "has_key": bool(db.get_setting("llm_api_key", "")),
+            "available": llm.available()}
 
 
 class SettingsBody(pydantic.BaseModel):

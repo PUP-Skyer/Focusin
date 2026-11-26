@@ -57,6 +57,9 @@ async function send(text) {
       } else if (ev.type === 'approval_resolved') {
         if (approval.value && approval.value.id === ev.id) { approval.value = null }
         setMood(ev.decision === 'approve' ? 'working' : 'error')
+      } else if (ev.type === 'fallback') {
+        assistant.text = `${ev.message}`
+        scrollBottom()
       } else if (ev.type === 'error') {
         assistant.text += `\n⚠️ ${ev.message}`
       } else if (ev.type === 'done') {
