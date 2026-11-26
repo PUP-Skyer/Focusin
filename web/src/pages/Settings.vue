@@ -20,8 +20,10 @@ async function save() {
     llm_api_key: apiKey.value || undefined
   })
   apiKey.value = ''
-  msg.value = '已保存。配置后对话页即走 LLM（多模型 OpenAI 兼容）。'
   await load()
+  msg.value = cfg.value.available
+    ? '已保存。当前使用真实 LLM（OpenAI 兼容）。'
+    : '已保存。模型配置尚未完整，当前使用本地规则兜底模式。'
 }
 
 async function reseed() {
@@ -35,7 +37,7 @@ async function reseed() {
   <div class="set">
     <section class="card block">
       <header class="blk-hd"><h3>模型接入（OpenAI 兼容）</h3>
-        <span class="blk-sub">{{ cfg.has_key ? '已配置 Key ✓' : '未配置 · 规则兜底模式' }}</span>
+        <span class="blk-sub">{{ cfg.available ? 'LLM 已就绪 ✓' : '规则兜底模式 · 配置未完整' }}</span>
       </header>
       <label class="row">
         <span>Base URL</span>
