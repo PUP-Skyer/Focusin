@@ -1,0 +1,17 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+
+# 本地数据（首次启动自动重建演示数据集）
+backend/focusin.db
+backend/focusin.db-wal
+backend/focusin.db-shm
+
+# Node
+web/node_modules/
+web/dist/
+
+# 系统杂项
+.DS_Store
+Thumbs.db
