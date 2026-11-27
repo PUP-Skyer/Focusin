@@ -4,9 +4,18 @@
 import base64
 import datetime
 import email
+import email.header
 import email.utils
+import hashlib
+import html
 import imaplib
+import os
 import re
+from html.parser import HTMLParser
+from urllib.parse import urlsplit
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+ATTACHMENT_DIR = os.path.join(BASE, "data", "attachments")
 
 IMAP_PRESETS = {}  # host → default port
 
@@ -76,41 +85,137 @@ def discover(creds):
     return convs
 
 
-def _body_text(msg, limit=1500):
-    parts = []
-    if msg.is_multipart():
-        for p in msg.walk():
-            if p.get_content_type() == "text/plain" and not p.get_filename():
-                parts.append(p)
-        part = parts[0] if parts else None
-    else:
-        part = msg if msg.get_content_type() == "text/plain" else None
-    if part is None:
+def _decode_header(value):
+    if not value:
         return ""
+    try:
+        return str(email.header.make_header(email.header.decode_header(str(value))))
+    except (LookupError, UnicodeDecodeError, ValueError):
+        return str(value)
+
+
+class _HTMLContent(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links = []
+        self.text = []
+        self.skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in ("script", "style"):
+            self.skip += 1
+        elif tag == "a" and not self.skip:
+            href = (dict(attrs).get("href") or "").strip()
+            if href:
+                self.links.append(href)
+        elif tag == "br" and not self.skip:
+            self.text.append("\n")
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in ("script", "style") and self.skip:
+            self.skip -= 1
+        elif tag in ("p", "div", "li", "tr", "h1", "h2", "h3", "h4") and not self.skip:
+            self.text.append("\n")
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.text.append(data)
+
+
+def _part_text(part):
     payload = part.get_payload(decode=True) or b""
     charset = part.get_content_charset() or "utf-8"
     try:
-        text = payload.decode(charset, "replace")
+        return payload.decode(charset, "replace")
     except (LookupError, UnicodeDecodeError):
-        text = payload.decode("gbk", "replace")
-    return text.strip()[:limit]
+        return payload.decode("gb18030", "replace")
+
+
+def _extract_links(values):
+    links = []
+    seen = set()
+    for value in values:
+        value = html.unescape(value or "")
+        for match in re.findall(r"(?:https?://|mailto:)[^\s<>\"']+", value, re.I):
+            url = match.strip().rstrip(".,;:!?，。；：！？、)]}）】》」』")
+            try:
+                scheme = urlsplit(url).scheme.lower()
+            except ValueError:
+                continue
+            if scheme not in ("http", "https", "mailto") or url in seen:
+                continue
+            seen.add(url)
+            links.append(url)
+    return links
+
+
+def _message_content(msg, limit=1500):
+    plain, html_links, html_text = [], [], []
+    for part in msg.walk():
+        if part.get_filename() or part.is_multipart():
+            continue
+        content_type = part.get_content_type()
+        if content_type == "text/plain":
+            plain.append(_part_text(part))
+        elif content_type == "text/html":
+            raw = _part_text(part)
+            parser = _HTMLContent()
+            parser.feed(raw)
+            html_links.extend(parser.links)
+            html_text.append("".join(parser.text))
+    body = "\n".join(plain).strip()
+    if not body and html_text:
+        body = re.sub(r"[ \t]+", " ", "\n".join(html_text))
+        body = re.sub(r"\n{3,}", "\n\n", body).strip()
+    links = _extract_links(plain + html_text + html_links)
+    return body[:limit], links
+
+
+def _safe_filename(value):
+    name = _decode_header(value).replace("\x00", "").strip()
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
+    return name or "附件"
+
+
+def _save_attachments(msg):
+    attachments = []
+    for part in msg.walk():
+        filename = part.get_filename()
+        if not filename and part.get_content_disposition() != "attachment":
+            continue
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            continue
+        storage_key = hashlib.sha256(payload).hexdigest()
+        os.makedirs(ATTACHMENT_DIR, exist_ok=True)
+        path = os.path.join(ATTACHMENT_DIR, storage_key)
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                f.write(payload)
+        attachments.append({
+            "filename": _safe_filename(filename),
+            "mime": part.get_content_type() or "application/octet-stream",
+            "size": len(payload),
+            "storage_key": storage_key,
+        })
+    return attachments
 
 
 def fetch_conversation(creds, conv_key, conv_title):
-    """拉取单个已订阅文件夹最近 14 天的信件（最多 50 封）。"""
+    """拉取单个已订阅文件夹最近 200 封信。"""
     quoted = '"' + conv_key.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    since = (datetime.date.today() - datetime.timedelta(days=14)
-             ).strftime("%d-%b-%Y")
     out = []
     with _connect(creds) as m:
         m.login(creds["username"], creds["password"])
         typ, _ = m.select(quoted.encode("ascii", "replace"), readonly=True)
         if typ != "OK":
             return out
-        typ, data = m.search(None, f"SINCE {since}")
+        typ, data = m.uid("SEARCH", None, "ALL")
         if typ != "OK":
             return out
-        uids = (data[0] or b"").split()[-50:]
+        uids = (data[0] or b"").split()[-200:]
         for uid in uids:
             typ, msg_data = m.uid("FETCH", uid, "(BODY.PEEK[])")
             if typ != "OK":
@@ -120,18 +225,20 @@ def fetch_conversation(creds, conv_key, conv_title):
                 msg = email.message_from_bytes(raw)
             except Exception:  # noqa: BLE001
                 continue
-            subject = str(msg.get("Subject", "(无主题)")).strip()
-            display, addr = email.utils.parseaddr(str(msg.get("From", "")))
-            sender = display or addr or "(未知发件人)"
+            subject = _decode_header(msg.get("Subject", "(无主题)")).strip()
+            display, addr = email.utils.parseaddr(_decode_header(msg.get("From", "")))
+            sender = _decode_header(display).strip() or addr or "(未知发件人)"
             dt = email.utils.parsedate_to_datetime(msg.get("Date", "")) \
                 if msg.get("Date") else None
             ts = dt.astimezone().strftime("%Y-%m-%d %H:%M") if dt else ""
-            body = _body_text(msg)
+            body, links = _message_content(msg)
+            attachments = _save_attachments(msg)
             text = f"{subject}\n{body}".strip()
             if not text:
                 continue
-            out.append({"sender": sender, "ts": ts or datetime.datetime.now()
+            out.append({"sender": sender, "sender_id": addr, "ts": ts or datetime.datetime.now()
                         .strftime("%Y-%m-%d %H:%M"), "text": text,
+                        "links": links, "attachments": attachments,
                         "dedup": f"imap:{creds.get('host')}:{creds.get('username')}"
                                  f":{conv_key}:{uid.decode()}"})
         m.close()

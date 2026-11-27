@@ -3,6 +3,7 @@
 无 LLM Key 时由规则兜底路由驱动同样的工具链，Demo 闭环不依赖网络。"""
 import json
 import re
+import secrets
 import time
 
 import db
@@ -14,7 +15,8 @@ SYSTEM_PROMPT = """你是「聚光 FocusIn」的智能助理小聚，帮助用�
 1. 你以平台聚合的消息为工作上下文，回答务必引用出处（渠道·会话 + 时间 + 发送者）。
 2. 涉及外发动作（发消息、发邮件）永远只起草，不代发，发送由用户自己完成。
 3. 创建/修改/删除日程必须调用日程工具，不允许口头宣布成功；日程时间必须来自消息原文。
-4. 语气轻松友好，简洁中文回复。"""
+4. 先给结论，再给最多 3 条带出处的依据，最后给一个可执行的下一步。
+5. 语气轻松友好，简洁中文回复；不输出大段寒暄，不复述用户问题。"""
 
 RISK_UPGRADE_KW = ["密码", "支付", "转账", "删除", "注销", "password", "delete"]
 
@@ -212,17 +214,21 @@ def execute_tool(name, args, emit):
 
 # ---------------- 主流程 ----------------
 
-def flow(user_text):
+def flow(user_text, session_id="legacy"):
     """事件生成器：Agent 流程在后台线程执行，事件经队列实时产出（审批等待不阻塞流）。"""
     import queue
     import threading
     q = queue.Queue()
+    request_id = secrets.token_hex(8)
+
+    def send(ev):
+        q.put({"request_id": request_id, **ev})
 
     def run():
         try:
-            _flow_sync(user_text, q.put)
+            _flow_sync(user_text, send, session_id)
         except Exception as e:  # noqa: BLE001
-            q.put({"type": "error", "message": str(e)})
+            send({"type": "error", "message": str(e)})
         finally:
             q.put(None)
 
@@ -234,27 +240,29 @@ def flow(user_text):
         yield ev
 
 
-def _flow_sync(user_text, emit):
-    db.ex("INSERT INTO chat_messages(role, content, ts) VALUES(?,?,?)",
-          ("user", user_text, db.now_iso()))
+def _flow_sync(user_text, emit, session_id):
+    db.ex("INSERT INTO chat_messages(role, content, ts, session_id) VALUES(?,?,?,?)",
+          ("user", user_text, db.now_iso(), session_id))
     full = []
     try:
         if llm.available():
-            _llm_flow(user_text, emit, full)
+            _llm_flow(user_text, emit, full, session_id)
         else:
             _fallback_flow(user_text, emit, full)
     except Exception as e:  # noqa: BLE001
         emit({"type": "error", "message": str(e)})
         full.append("\n（出错了，但我还在）")
     answer = "".join(full).strip() or "（小聚走神了，再试一次？）"
-    db.ex("INSERT INTO chat_messages(role, content, ts) VALUES(?,?,?)",
-          ("assistant", answer, db.now_iso()))
+    db.ex("INSERT INTO chat_messages(role, content, ts, session_id) VALUES(?,?,?,?)",
+          ("assistant", answer, db.now_iso(), session_id))
+    db.touch_chat_session(session_id, user_text)
     emit({"type": "done", "content": answer})
 
 
-def _llm_flow(user_text, emit, full):
+def _llm_flow(user_text, emit, full, session_id):
     emit({"type": "thinking", "text": "正在思考…（LLM）"})
-    history = db.q("SELECT role, content FROM chat_messages ORDER BY id DESC LIMIT 24")
+    history = db.q("SELECT role, content FROM chat_messages WHERE session_id=? "
+                   "ORDER BY id DESC LIMIT 24", (session_id,))
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + [
         {"role": r["role"], "content": r["content"]} for r in reversed(history)]
 

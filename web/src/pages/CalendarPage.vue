@@ -1,9 +1,12 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
-import { get, post, CH_CLASS } from '../api.js'
+import { computed, inject, onMounted, ref } from 'vue'
+import { get, post, CH_CLASS, messageSource, openMessageSource } from '../api.js'
 
+const gotoMessages = inject('gotoMessages')
 const events = ref([])
 const month = ref(new Date())
+const sourceNotice = ref('')
+let sourceNoticeTimer
 
 async function load() {
   events.value = await get('/schedule')
@@ -12,6 +15,18 @@ onMounted(() => { load(); setInterval(load, 15000) })
 
 async function confirm(e) { await post(`/schedule/${e.id}/confirm`); load() }
 async function dismiss(e) { await post(`/schedule/${e.id}/dismiss`); load() }
+
+async function openSource(e) {
+  if (!e.source) return
+  if (messageSource(e.source).supported) {
+    sourceNotice.value = await openMessageSource(e.source)
+    clearTimeout(sourceNoticeTimer)
+    sourceNoticeTimer = setTimeout(() => { sourceNotice.value = '' }, 5000)
+    return
+  }
+  if (!e.source_msg_id || !e.src_channel || !e.src_conv_key) return
+  gotoMessages({ channel: e.src_channel, conv: e.src_conv_key, account: e.src_account || '' })
+}
 
 const pending = computed(() => events.value.filter(e => e.status === 'pending'))
 const confirmed = computed(() => events.value.filter(e => e.status === 'confirmed'))
@@ -43,23 +58,31 @@ const isToday = (k) => k === new Date().toISOString().slice(0, 10)
 
 <template>
   <div class="cal">
-    <!-- 待确认日程（防幻觉：展示原文依据） -->
+    <p v-if="sourceNotice" class="source-notice" role="status">{{ sourceNotice }}</p>
+    <!-- 待确认日程：仅展示重点，点击卡片查看原文 -->
     <section v-if="pending.length" class="card block">
       <header class="blk-hd"><h3>待确认日程</h3>
-        <span class="blk-sub">从消息中提取 · 展示原文依据，确认后落库生效</span>
+        <span class="blk-sub">仅展示重点 · 点击卡片查看原文</span>
       </header>
       <div class="confirm-row">
-        <article v-for="e in pending" :key="e.id" class="confirm card">
+        <article v-for="e in pending" :key="e.id" class="confirm card"
+          :class="{ clickable: e.source_msg_id && e.src_conv_key }"
+          @click="openSource(e)">
           <div class="c-when">
             <b>{{ e.start_at.slice(5, 10) }}</b>
             <span>{{ e.start_at.slice(11, 16) }}</span>
           </div>
           <div class="c-body">
-            <b>{{ e.title }}</b>
-            <p class="src">依据原文：[{{ e.source?.ts }}] {{ e.source?.sender }}：「{{ e.source?.text }}」</p>
-            <div class="c-acts">
-              <button class="btn btn-brand" @click="confirm(e)">确认入库 · 双提醒生效</button>
+            <div class="c-topline">
+              <span class="c-status">待确认</span>
+              <span class="c-source">{{ e.src_channel === 'email' ? '邮件' : '群消息' }}</span>
+            </div>
+            <b class="c-title" :title="e.title">{{ e.title }}</b>
+            <div class="c-acts" @click.stop @keydown.stop>
+              <button class="btn btn-brand" @click="confirm(e)">确认入库</button>
               <button class="btn" @click="dismiss(e)">忽略</button>
+              <button v-if="e.source_msg_id && e.src_conv_key" class="btn btn-link"
+                @click.stop="openSource(e)">查看详情 ↗</button>
             </div>
           </div>
         </article>
@@ -89,13 +112,14 @@ const isToday = (k) => k === new Date().toISOString().slice(0, 10)
           <span class="blk-sub">{{ confirmed.length }} 个已确认</span>
         </header>
         <ul class="evs">
-          <li v-for="e in events" :key="e.id">
+          <li v-for="e in events" :key="e.id" :class="{ clickable: e.source_msg_id && e.src_conv_key }"
+            @click="openSource(e)">
             <span :class="['ch-dot', CH_CLASS[e.src_channel || 'feishu']]"></span>
             <div class="e-body">
-              <b>{{ e.start_at }}</b>
-              <span>{{ e.title }}</span>
+              <b>{{ e.start_at.slice(5, 16) }}</b>
+              <span class="e-title" :title="e.title">{{ e.title }}</span>
               <em v-if="e.status === 'pending'">待确认</em>
-              <p class="src" v-if="e.source">来自：{{ e.source.conv }} · {{ e.source.sender }}</p>
+              <span v-if="e.source_msg_id && e.src_conv_key" class="e-arrow">↗</span>
             </div>
           </li>
         </ul>
@@ -107,45 +131,70 @@ const isToday = (k) => k === new Date().toISOString().slice(0, 10)
 
 <style scoped>
 .block { padding: var(--sp-5); margin-bottom: var(--sp-4); }
-.blk-hd { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-4); }
-.blk-hd h3 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
-.blk-sub { font-size: 11px; color: var(--text-3); margin-left: auto; }
-.mini-btn { padding: 0 10px; font-size: 12px; }
+.source-notice {
+  margin: 0 0 var(--sp-3); padding: 10px 12px; border: 1px solid var(--line);
+  border-left: 3px solid var(--brand); border-radius: 8px;
+  background: var(--surface-2); color: var(--text-2); font-size: var(--text-xs); line-height: var(--leading-snug);
+}
+.blk-hd { display: flex; align-items: baseline; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+.blk-hd h3 { margin: 0; font-family: var(--font-display); font-size: var(--text-lg); font-weight: 700; letter-spacing: -0.015em; }
+.blk-sub { font-size: var(--text-xs); line-height: var(--leading-snug); color: var(--text-3); margin-left: auto; }
+.mini-btn { padding: 0 10px; font-size: var(--text-xs); }
 
-.confirm-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: var(--sp-3); }
+.confirm-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--sp-3); }
 .confirm {
-  display: flex; gap: var(--sp-4); padding: var(--sp-4);
+  display: flex; gap: var(--sp-4); padding: var(--sp-4) var(--sp-5);
   background: var(--surface-2); border-color: transparent; box-shadow: none;
+  transition: border-color 160ms, background 160ms, transform 160ms;
+}
+.confirm.clickable { cursor: pointer; }
+.confirm.clickable:hover {
+  background: var(--surface); border-color: var(--line); transform: translateY(-1px);
 }
 .c-when {
-  text-align: center; background: var(--surface); border-radius: var(--radius-sm);
-  padding: var(--sp-3) var(--sp-3); min-width: 64px;
+  flex: 0 0 62px; align-self: flex-start; text-align: center;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 10px 6px;
 }
-.c-when b { display: block; font-size: 16px; color: var(--brand-strong); letter-spacing: -0.02em; }
-.c-when span { font-size: 12px; }
-.c-body b { font-size: 14px; font-weight: 600; }
-.src { font-size: 11px; color: var(--text-2); margin: var(--sp-1) 0 var(--sp-3); line-height: 1.5; }
-.c-acts { display: flex; gap: var(--sp-2); }
+.c-when b { display: block; font-size: 18px; line-height: 1.1; color: var(--brand-strong); letter-spacing: -0.03em; }
+.c-when span { display: block; margin-top: 6px; font-size: var(--text-xs); line-height: 1.3; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.c-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.c-topline { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.c-status {
+  display: inline-flex; align-items: center; min-height: 20px; padding: 0 8px;
+  border-radius: 999px; background: var(--brand-weak); color: var(--brand-strong);
+  font-size: var(--text-2xs); font-weight: 650;
+}
+.c-source { font-size: var(--text-2xs); line-height: 1.35; color: var(--text-3); }
+.c-title {
+  display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; font-size: var(--text-md); line-height: var(--leading-snug); font-weight: 650;
+  letter-spacing: -0.01em; overflow-wrap: anywhere;
+}
+.c-acts { display: flex; align-items: center; gap: var(--sp-2); margin-top: 14px; }
+.btn-link { margin-left: auto; padding-inline: 2px; color: var(--brand-strong); background: transparent; border-color: transparent; }
+.btn-link:hover { background: transparent; color: var(--brand); }
 
 .cal-cols { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; }
 .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
-.wd { text-align: center; font-size: 11px; color: var(--text-3); padding: 4px 0; }
+.wd { text-align: center; font-size: var(--text-xs); line-height: 1.35; color: var(--text-3); padding: 5px 0; }
 .day { border: none; background: var(--surface-2); border-radius: 8px; aspect-ratio: 1;
-  font-size: 12px; color: var(--text); display: flex; flex-direction: column; align-items: center;
-  padding-top: 4px; gap: 2px; position: relative; }
+  font-size: var(--text-sm); line-height: 1.2; color: var(--text); display: flex; flex-direction: column; align-items: center;
+  padding-top: 5px; gap: 3px; position: relative; }
 .day.out { color: var(--text-3); background: transparent; }
 .day.today { outline: 2px solid var(--brand); }
 .day i { width: 5px; height: 5px; border-radius: 50%; }
 .ev-on { background: var(--brand); }
 .ev-pending { background: var(--text-3); }
 
-.evs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.evs li { display: flex; gap: 10px; align-items: flex-start; padding: 8px;
-  border-radius: 8px; }
-.evs li:hover { background: var(--surface-2); }
-.e-body b { font-size: 12px; color: var(--text-2); margin-right: 8px; font-weight: 600; }
-.e-body span { font-size: 13px; }
-.e-body em { font-style: normal; font-size: 10px; color: var(--brand-strong); margin-left: 6px; }
-.e-body .src { margin: 2px 0 0; }
-.empty { color: var(--text-3); font-size: 12px; }
+.evs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.evs li { display: flex; gap: 10px; align-items: center; padding: 10px 8px; border-radius: 8px; }
+.evs li.clickable { cursor: pointer; }
+.evs li.clickable:hover { background: var(--surface-2); }
+.e-body { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; }
+.e-body b { flex: 0 0 auto; font-size: var(--text-xs); line-height: 1.35; color: var(--text-3); font-weight: 600; font-variant-numeric: tabular-nums; }
+.e-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); line-height: 1.4; }
+.e-body em { flex: 0 0 auto; font-style: normal; font-size: var(--text-2xs); color: var(--brand-strong); }
+.e-arrow { flex: 0 0 auto; margin-left: auto; color: var(--text-3); font-size: var(--text-xs); }
+.empty { color: var(--text-3); font-size: var(--text-xs); line-height: var(--leading-normal); }
 </style>

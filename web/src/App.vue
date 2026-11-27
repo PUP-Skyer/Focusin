@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, provide, ref } from 'vue'
+import { computed, onMounted, provide, ref, watch } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import Mascot from './components/Mascot.vue'
 import Overview from './pages/Overview.vue'
@@ -14,15 +14,27 @@ const TABS = [
   { key: 'overview', label: '纵览' },
   { key: 'messages', label: '消息流' },
   { key: 'calendar', label: '日历' },
-  { key: 'chat', label: '对话' },
+  { key: 'chat', label: '新对话' },
   { key: 'connectors', label: '渠道接入' },
   { key: 'settings', label: '设置' }
 ]
-const tab = ref('overview')
+function tabFromUrl() {
+  const requested = new URLSearchParams(window.location.search).get('tab')
+  return TABS.some(t => t.key === requested) ? requested : 'overview'
+}
+const tab = ref(tabFromUrl())
+let restoring = false
 const theme = ref(localStorage.getItem('fi-theme') || 'light')
 const notif = ref({ n: 0, items: [] })
 const mascotMood = ref('idle')
-const jumpConv = ref(null) // {channel, conv} 跨页跳转
+const jumpConv = ref(null) // {channel, conv, account} 跨页跳转
+
+watch(tab, next => {
+  if (restoring) return
+  const url = new URL(window.location.href)
+  url.searchParams.set('tab', next)
+  window.history.pushState({ focusinTab: next }, '', url)
+})
 
 function setTheme(t) {
   theme.value = t
@@ -48,8 +60,16 @@ const page = computed(() => ({
 provide('gotoMessages', go)
 provide('setMood', (m) => { mascotMood.value = m })
 provide('goChat', () => { tab.value = 'chat' })
+provide('goTab', (key) => { if (TABS.some(t => t.key === key)) tab.value = key })
 
-onMounted(() => { pollNotif(); setInterval(pollNotif, 30000) })
+onMounted(() => {
+  pollNotif(); setInterval(pollNotif, 30000)
+  window.addEventListener('popstate', () => {
+    restoring = true
+    tab.value = tabFromUrl()
+    queueMicrotask(() => { restoring = false })
+  })
+})
 </script>
 
 <template>
@@ -88,31 +108,46 @@ onMounted(() => { pollNotif(); setInterval(pollNotif, 30000) })
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 .topbar {
-  display: flex; align-items: center; gap: 18px;
-  padding: 10px 20px; background: var(--surface);
+  display: flex; align-items: center; gap: 18px; min-height: 56px;
+  padding: 10px clamp(16px, 2vw, 28px); background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
-.logo-mini { font-weight: 700; color: var(--brand-strong); white-space: nowrap; }
-.logo-mini span { color: var(--text-3); font-weight: 500; font-size: 11px; margin-left: 4px; }
+.logo-mini { font-family: var(--font-display); font-size: 15px; font-weight: 750; color: var(--brand-strong); white-space: nowrap; }
+.logo-mini span { color: var(--text-3); font-weight: 500; font-size: var(--text-2xs); margin-left: 5px; letter-spacing: .01em; }
 
-.capsules { display: flex; gap: 6px; background: var(--surface-2); border-radius: 999px; padding: 4px; }
+.capsules { flex: 1; min-width: 0; display: flex; gap: 4px; background: var(--surface-2); border-radius: 999px; padding: 4px; overflow-x: auto; scrollbar-width: none; }
+.capsules::-webkit-scrollbar { display: none; }
 .cap {
-  border: none; background: transparent; color: var(--text-2);
-  border-radius: 999px; padding: 6px 16px; font-size: 13px;
+  flex-shrink: 0; border: none; background: transparent; color: var(--text-2);
+  border-radius: 999px; padding: 7px 15px; font-size: var(--text-sm); line-height: 1.2;
+  white-space: nowrap; transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
 }
-.cap.on { background: #241f1a; color: #fff; }
-.cap:not(.on):hover { color: var(--brand-strong); }
+.cap.on { background: #241f1a; color: #fff; box-shadow: 0 1px 3px rgba(29, 28, 26, .16); }
+.cap:not(.on):hover { color: var(--brand-strong); background: var(--brand-weak); }
 
-.top-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.top-right { margin-left: auto; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 .bell { position: relative; cursor: default; }
 .bell-n {
   position: absolute; top: -6px; right: -10px; font-style: normal;
   background: var(--warn); color: #fff; border-radius: 999px;
-  font-size: 10px; padding: 0 5px; line-height: 15px;
+  font-size: var(--text-2xs); padding: 0 5px; line-height: 15px;
 }
-.page { flex: 1; overflow: auto; padding: 20px; }
+.page {
+  flex: 1; overflow: auto; width: 100%; max-width: 1320px; margin: 0 auto;
+  padding: clamp(16px, 2vw, 24px);
+}
 
-@media (max-width: 900px) {
-  .capsules { display: none; }
+@media (max-width: 1100px) {
+  .logo-mini { display: none; }
+  .topbar { gap: 10px; }
+}
+@media (max-width: 760px) {
+  .topbar { padding-inline: 12px; }
+  .top-right { gap: 6px; }
+  .top-right .cap { padding-inline: 10px; }
+  .bell { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cap { transition: none; }
 }
 </style>

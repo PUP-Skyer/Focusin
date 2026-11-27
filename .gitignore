@@ -7,6 +7,8 @@ __pycache__/
 backend/focusin.db
 backend/focusin.db-wal
 backend/focusin.db-shm
+backend/focusin.db.bak-*
+backend/connectors/data/attachments/
 
 # Node
 web/node_modules/

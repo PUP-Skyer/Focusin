@@ -61,16 +61,18 @@ async function reseed() {
       <header class="blk-hd"><h3>工具调用审计（Sentinel）</h3>
         <span class="blk-sub">每次工具调用：时间 · 工具 · 风险 · 审批</span>
       </header>
-      <table v-if="audit.length" class="tb">
-        <thead><tr><th>时间</th><th>工具</th><th>风险</th><th>结果</th></tr></thead>
-        <tbody>
-          <tr v-for="a in audit" :key="a.id">
-            <td>{{ a.ts }}</td><td>{{ a.tool }}</td>
-            <td><span :class="'risk r-' + a.risk">{{ a.risk }}</span></td>
-            <td class="res">{{ a.result?.slice(0, 46) }}</td>
-          </tr>
-        </tbody>
-      </table>
+      <div v-if="audit.length" class="tb-wrap">
+        <table class="tb">
+          <thead><tr><th>时间</th><th>工具</th><th>风险</th><th>结果</th></tr></thead>
+          <tbody>
+            <tr v-for="a in audit" :key="a.id">
+              <td>{{ a.ts }}</td><td>{{ a.tool }}</td>
+              <td><span :class="'risk r-' + a.risk">{{ a.risk }}</span></td>
+              <td class="res">{{ a.result?.slice(0, 46) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
       <p v-else class="empty">暂无工具调用记录。去对话页让小聚干活，这里会留下全量审计。</p>
     </section>
 
@@ -85,30 +87,40 @@ async function reseed() {
 </template>
 
 <style scoped>
-.set { max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
-.block { padding: 18px; }
-.blk-hd { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
-.blk-hd h3 { margin: 0; font-size: 15px; }
-.blk-sub { font-size: 11px; color: var(--text-3); margin-left: auto; }
+.set { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--sp-5); }
+.block { padding: 20px; }
+.blk-hd { display: flex; align-items: baseline; gap: var(--sp-3); margin-bottom: var(--sp-4); flex-wrap: wrap; }
+.blk-hd h3 { margin: 0; font-size: var(--text-lg); font-weight: 700; line-height: var(--leading-tight); }
+.blk-sub { font-size: var(--text-xs); color: var(--text-3); margin-left: auto; line-height: var(--leading-snug); }
 
-.row { display: grid; grid-template-columns: 80px 1fr; gap: 10px; align-items: center;
-  margin-bottom: 10px; font-size: 13px; }
-.row input { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
-  background: var(--surface); font-size: 13px; outline: none; }
-.row input:focus { border-color: var(--brand); }
-.note { font-size: 11px; color: var(--text-3); margin: 0 0 12px; }
-.acts { display: flex; gap: 10px; }
-.ok { font-size: 12px; color: var(--ok); margin: 12px 0 0; }
+.row { display: grid; grid-template-columns: 88px 1fr; gap: var(--sp-3); align-items: center;
+  margin-bottom: var(--sp-3); font-size: var(--text-sm); }
+.row input { border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px;
+  background: var(--surface); font-size: var(--text-base); line-height: 1.4; outline: none; }
+.row input:focus-visible { border-color: var(--brand); outline: 2px solid var(--brand); outline-offset: 1px; }
+.note { font-size: var(--text-xs); color: var(--text-3); margin: var(--sp-3) 0 0; line-height: var(--leading-relaxed); }
+.acts { display: flex; gap: 10px; flex-wrap: wrap; margin-top: var(--sp-4); }
+.ok { font-size: var(--text-xs); color: var(--ok); margin: var(--sp-3) 0 0; line-height: var(--leading-snug); }
 
-.tb { width: 100%; border-collapse: collapse; font-size: 12px; }
-.tb th { text-align: left; font-size: 11px; color: var(--text-3); padding: 4px 8px; font-weight: 500; }
-.tb td { border-top: 1px solid var(--line); padding: 6px 8px; vertical-align: top; }
-.res { color: var(--text-2); max-width: 300px; }
-.risk { font-size: 10px; border-radius: 4px; padding: 0 4px; }
+.tb-wrap { overflow-x: auto; }
+.tb { width: 100%; border-collapse: collapse; font-size: var(--text-sm); min-width: 520px; }
+.tb th { text-align: left; font-size: var(--text-2xs); color: var(--text-3); padding: 7px 8px; font-weight: 650; line-height: 1.4; }
+.tb td { border-top: 1px solid var(--line); padding: 10px 8px; vertical-align: top; line-height: var(--leading-snug); }
+.res { color: var(--text-2); max-width: 300px; overflow-wrap: anywhere; }
+.risk { font-size: var(--text-2xs); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
 .r-safe { background: #e3f7f1; color: #0e8a70; }
 .r-moderate { background: #fdeed9; color: #b05e00; }
 .r-sensitive { background: #ffe7e7; color: #d0342c; }
 .r-unknown { background: var(--surface-2); color: var(--text-3); }
-.empty { font-size: 12px; color: var(--text-3); }
-.about p { font-size: 12px; color: var(--text-2); line-height: 1.7; }
+.empty { font-size: var(--text-xs); color: var(--text-3); line-height: var(--leading-relaxed); }
+.about p { font-size: var(--text-sm); color: var(--text-2); line-height: var(--leading-relaxed); margin: 0 0 12px; }
+.about p:last-child { margin-bottom: 0; }
+
+@media (max-width: 640px) {
+  .set { gap: 16px; }
+  .block { padding: 16px; }
+  .blk-hd { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .blk-sub { margin-left: 0; }
+  .row { grid-template-columns: 1fr; gap: 6px; }
+}
 </style>
