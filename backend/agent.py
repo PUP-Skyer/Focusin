@@ -9,6 +9,8 @@ import time
 import db
 import llm
 import triage
+import uploads
+import workspace
 
 SYSTEM_PROMPT = """你是「聚光 FocusIn」的智能助理小聚，帮助用户打理跨渠道聚合的消息。
 规则：
@@ -16,7 +18,9 @@ SYSTEM_PROMPT = """你是「聚光 FocusIn」的智能助理小聚，帮助用�
 2. 涉及外发动作（发消息、发邮件）永远只起草，不代发，发送由用户自己完成。
 3. 创建/修改/删除日程必须调用日程工具，不允许口头宣布成功；日程时间必须来自消息原文。
 4. 先给结论，再给最多 3 条带出处的依据，最后给一个可执行的下一步。
-5. 语气轻松友好，简洁中文回复；不输出大段寒暄，不复述用户问题。"""
+5. 语气轻松友好，简洁中文回复；不输出大段寒暄，不复述用户问题。
+6. 用户上传的附件和授权的本地工作区是额外上下文；读取文件必须使用工具，并注明文件路径。
+7. 工作区默认只读；写入必须先取得写权限，并且每次写入都经过用户审批。敏感文件默认不可访问。"""
 
 RISK_UPGRADE_KW = ["密码", "支付", "转账", "删除", "注销", "password", "delete"]
 
@@ -58,7 +62,8 @@ def t_list_schedule(args):
     for r in rows:
         tag = "已确认" if r["status"] == "confirmed" else "待确认"
         src = (r["src"] or "")[:30]
-        lines.append(f"{r['start_at']}｜{r['title']}（{tag}）依据：{src}（日程#{r['id']}）")
+        title = triage.event_title(r["title"], limit=80)
+        lines.append(f"{r['start_at']}｜{title}（{tag}）依据：{src}（日程#{r['id']}）")
     return "\n".join(lines)
 
 
@@ -97,6 +102,24 @@ def t_save_draft(args):
           (title, content, db.now_iso()))
     return {"ok": True, "note": "草稿已保存（只起草，不代发）", "draft_id": db.q(
         "SELECT MAX(id) id FROM drafts")[0]["id"]}
+
+
+def t_list_workspace(args):
+    return workspace.list_directory(args.get("workspace_id"), args.get("path") or ".")
+
+
+def t_read_workspace_file(args):
+    return workspace.read_text(args.get("workspace_id"), args.get("path") or "")
+
+
+def t_write_workspace_file(args):
+    return workspace.write_text(args.get("workspace_id"), args.get("path") or "",
+                                args.get("content") or "")
+
+
+def t_read_attachment(args, context=None):
+    session_id = (context or {}).get("session_id", "legacy")
+    return {"ok": True, "content": uploads.read_attachment_text(args.get("id"), session_id)}
 
 
 # ---------------- 工具注册表 ----------------
@@ -138,6 +161,28 @@ TOOLS = {
         "schema": {"type": "object", "properties": {
             "title": {"type": "string"}, "content": {"type": "string"}},
             "required": ["content"]}},
+    "list_workspace": {
+        "desc": "列出用户已授权本地工作区中的目录内容。",
+        "risk": "safe", "handler": t_list_workspace,
+        "schema": {"type": "object", "properties": {
+            "workspace_id": {"type": "integer"}, "path": {"type": "string"}}}},
+    "read_workspace_file": {
+        "desc": "读取已授权工作区内的文本文件，敏感文件会被拒绝。",
+        "risk": "safe", "handler": t_read_workspace_file,
+        "schema": {"type": "object", "properties": {
+            "workspace_id": {"type": "integer"}, "path": {"type": "string"}},
+            "required": ["path"]}},
+    "write_workspace_file": {
+        "desc": "写入已授权且开放编辑的工作区；每次写入都必须经过用户审批。",
+        "risk": "sensitive", "handler": t_write_workspace_file,
+        "schema": {"type": "object", "properties": {
+            "workspace_id": {"type": "integer"}, "path": {"type": "string"},
+            "content": {"type": "string"}}, "required": ["path", "content"]}},
+    "read_attachment": {
+        "desc": "读取当前会话上传的文本附件。",
+        "risk": "safe", "handler": t_read_attachment, "needs_context": True,
+        "schema": {"type": "object", "properties": {
+            "id": {"type": "integer"}}, "required": ["id"]}},
 }
 
 
@@ -184,7 +229,7 @@ def request_approval(name, args, risk, emit):
     return False, aid
 
 
-def execute_tool(name, args, emit):
+def execute_tool(name, args, emit, context=None):
     """统一执行入口：safe 直跑；moderate/sensitive 过审批门。"""
     if name not in TOOLS:
         result = {"ok": False, "reason": f"未知工具 {name}"}
@@ -202,7 +247,8 @@ def execute_tool(name, args, emit):
             audit(name, args, risk, approval_id, result)
             return result
     try:
-        result = TOOLS[name]["handler"](args)
+        handler = TOOLS[name]["handler"]
+        result = handler(args, context) if TOOLS[name].get("needs_context") else handler(args)
     except Exception as e:  # noqa: BLE001
         result = {"ok": False, "reason": f"工具执行异常: {e}"}
     failed = isinstance(result, dict) and result.get("ok") is False
@@ -214,7 +260,7 @@ def execute_tool(name, args, emit):
 
 # ---------------- 主流程 ----------------
 
-def flow(user_text, session_id="legacy"):
+def flow(user_text, session_id="legacy", options=None):
     """事件生成器：Agent 流程在后台线程执行，事件经队列实时产出（审批等待不阻塞流）。"""
     import queue
     import threading
@@ -226,7 +272,7 @@ def flow(user_text, session_id="legacy"):
 
     def run():
         try:
-            _flow_sync(user_text, send, session_id)
+            _flow_sync(user_text, send, session_id, options or {})
         except Exception as e:  # noqa: BLE001
             send({"type": "error", "message": str(e)})
         finally:
@@ -240,15 +286,25 @@ def flow(user_text, session_id="legacy"):
         yield ev
 
 
-def _flow_sync(user_text, emit, session_id):
+def _flow_sync(user_text, emit, session_id, options):
     db.ex("INSERT INTO chat_messages(role, content, ts, session_id) VALUES(?,?,?,?)",
           ("user", user_text, db.now_iso(), session_id))
+    model = str(options.get("model") or "").strip()[:120]
+    reasoning_effort = str(options.get("reasoning_effort") or "").strip()
+    attachment_ids = options.get("attachment_ids") or []
+    upload_context = uploads.build_context(attachment_ids, session_id)
+    workspace_context = workspace.describe_workspaces()
+    extra_context = ""
+    if workspace_context != "尚未授权本地工作区。":
+        extra_context += "\n\n已授权本地工作区：\n" + workspace_context
+    if upload_context:
+        extra_context += "\n\n当前上传附件：\n" + upload_context
     full = []
     try:
-        if llm.available():
-            _llm_flow(user_text, emit, full, session_id)
+        if llm.available(model):
+            _llm_flow(user_text, emit, full, session_id, model, reasoning_effort, extra_context)
         else:
-            _fallback_flow(user_text, emit, full)
+            _fallback_flow(user_text, emit, full, upload_context, workspace_context)
     except Exception as e:  # noqa: BLE001
         emit({"type": "error", "message": str(e)})
         full.append("\n（出错了，但我还在）")
@@ -259,15 +315,17 @@ def _flow_sync(user_text, emit, session_id):
     emit({"type": "done", "content": answer})
 
 
-def _llm_flow(user_text, emit, full, session_id):
+def _llm_flow(user_text, emit, full, session_id, model="", reasoning_effort="", extra_context=""):
     emit({"type": "thinking", "text": "正在思考…（LLM）"})
     history = db.q("SELECT role, content FROM chat_messages WHERE session_id=? "
                    "ORDER BY id DESC LIMIT 24", (session_id,))
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + [
+    system_content = SYSTEM_PROMPT + extra_context
+    msgs = [{"role": "system", "content": system_content}] + [
         {"role": r["role"], "content": r["content"]} for r in reversed(history)]
 
     for _round in range(6):
-        text, tool_calls = llm.run(msgs, tools_schema(), on_delta=full.append)
+        text, tool_calls = llm.run(msgs, tools_schema(), on_delta=full.append,
+                                   model=model, reasoning_effort=reasoning_effort)
         if not tool_calls:
             emit({"type": "thinking_done"})
             return
@@ -281,17 +339,32 @@ def _llm_flow(user_text, emit, full, session_id):
                 args = json.loads(tc["args"] or "{}")
             except json.JSONDecodeError:
                 args = {}
-            result = execute_tool(tc["name"], args, emit)
+            result = execute_tool(tc["name"], args, emit, {"session_id": session_id})
             msgs.append({"role": "tool", "tool_call_id": tc["id"],
                          "content": result if isinstance(result, str)
                          else json.dumps(result, ensure_ascii=False)})
         emit({"type": "thinking_done"})
 
 
-def _fallback_flow(user_text, emit, full):
+def _fallback_flow(user_text, emit, full, upload_context="", workspace_context=""):
     """规则兜底路由：同样走工具链与审批门，断网也能演示 P0 闭环。"""
     emit({"type": "thinking", "text": "正在检索消息上下文…（本地规则模式）"})
     t = user_text
+
+    if upload_context and any(k in t for k in ["附件", "文件", "上传", "总结", "分析"]):
+        emit({"type": "thinking", "text": "读取上传材料…"})
+        full.append("我已拿到你上传的材料：\n" + upload_context)
+        emit({"type": "thinking_done"})
+        return
+
+    if workspace_context and any(k in t for k in ["工作区", "目录", "文件夹", "本地文件"]):
+        emit({"type": "thinking", "text": "查看已授权工作区…"})
+        full.append("已授权工作区：\n" + workspace_context)
+        if workspace.list_workspaces():
+            result = execute_tool("list_workspace", {}, emit)
+            full.append("\n目录内容：\n" + str(result))
+        emit({"type": "thinking_done"})
+        return
 
     dt = triage.parse_time(t)
     if dt and any(k in t for k in ["提醒", "安排", "记", "定", "加个"]):

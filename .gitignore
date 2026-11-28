@@ -9,6 +9,7 @@ backend/focusin.db-wal
 backend/focusin.db-shm
 backend/focusin.db.bak-*
 backend/connectors/data/attachments/
+backend/uploads/
 
 # Node
 web/node_modules/

@@ -2,7 +2,11 @@ const HEADERS = { 'Content-Type': 'application/json' }
 
 async function api(path, opts = {}) {
   const res = await fetch('/api' + path, opts)
-  if (!res.ok) throw new Error(`${res.status} ${path}`)
+  if (!res.ok) {
+    let detail = ''
+    try { detail = (await res.json()).detail || '' } catch { /* 使用状态码 */ }
+    throw new Error(detail ? `${res.status} ${detail}` : `${res.status} ${path}`)
+  }
   return res.json()
 }
 
@@ -13,10 +17,15 @@ export function notifyConversationsChanged() {
 }
 
 /** SSE/NDJSON 流式对话 */
-export async function* chatStream(message, { sessionId = 'legacy', signal } = {}) {
+export async function* chatStream(message, {
+  sessionId = 'legacy', signal, model = '', reasoningEffort = '', attachmentIds = []
+} = {}) {
   const res = await fetch('/api/chat', {
     method: 'POST', headers: HEADERS, signal,
-    body: JSON.stringify({ message, session_id: sessionId })
+    body: JSON.stringify({
+      message, session_id: sessionId, model,
+      reasoning_effort: reasoningEffort, attachment_ids: attachmentIds
+    })
   })
   if (!res.ok) throw new Error(`${res.status} /api/chat`)
   const reader = res.body.getReader()
@@ -41,6 +50,38 @@ export const chatSessions = () => get('/chat/sessions')
 export const createChatSession = (title = '新对话') => post('/chat/sessions', { title })
 export const chatSessionMessages = (id) => get(`/chat/sessions/${encodeURIComponent(id)}/messages`)
 export const runWorkflow = (id, sessionId = '') => post(`/workflows/${encodeURIComponent(id)}/execute`, { session_id: sessionId })
+export const modelCatalog = () => get('/models')
+export const serviceHealth = () => get('/health')
+export const listWorkspaces = () => get('/workspaces')
+export const chooseWorkspace = () => post('/workspaces/choose', { confirm: true })
+export const grantWorkspace = (path, access = 'read') => post('/workspaces', { path, access, confirm: true })
+export const setWorkspaceAccess = (id, access) => post(`/workspaces/${id}/access`, { access, confirm: true })
+export const removeWorkspace = (id) => post(`/workspaces/${id}/delete`)
+
+export async function uploadChatFiles(sessionId, files) {
+  try {
+    await serviceHealth()
+  } catch {
+    throw new Error('本地服务未连接，请确认后端已在 8765 端口启动')
+  }
+  const form = new FormData()
+  form.append('session_id', sessionId)
+  for (const file of files) form.append('files', file, file.webkitRelativePath || file.name)
+  let res
+  try {
+    res = await fetch('/api/chat/uploads', { method: 'POST', body: form })
+  } catch {
+    throw new Error('上传连接中断，请确认本地服务仍在运行后重试')
+  }
+  if (!res.ok) {
+    let detail = ''
+    try { detail = (await res.json()).detail || '' } catch { /* 使用状态码 */ }
+    throw new Error(detail || `${res.status} 上传失败`)
+  }
+  return res.json()
+}
+
+export const deleteChatUploads = (sessionId, ids) => post('/chat/uploads/delete', { session_id: sessionId, ids })
 
 export const GROUP_LABEL = { todo: '待办', schedule: '日程', notice: '通知', important: '重要', chatter: '闲聊' }
 export const GROUP_CLASS = { todo: 'grp-todo', schedule: 'grp-schedule', notice: 'grp-notice', important: 'grp-important', chatter: 'grp-chatter' }

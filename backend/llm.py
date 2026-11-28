@@ -6,25 +6,45 @@ import requests
 import db
 
 
-def config():
+def config(model=None):
     return {
         "base_url": db.get_setting("llm_base_url", ""),
         "api_key": db.get_setting("llm_api_key", ""),
-        "model": db.get_setting("llm_model", ""),
+        "model": model or db.get_setting("llm_model", ""),
     }
 
 
-def available():
-    c = config()
+def available(model=None):
+    if model == "local":
+        return False
+    c = config(model)
     return bool(c["base_url"] and c["api_key"] and c["model"])
 
 
-def run(messages, tools=None, on_delta=None):
-    """一次对话调用，流式转发文本增量，返回 (最终文本, 工具调用列表)。"""
+def list_models():
     c = config()
+    if not (c["base_url"] and c["api_key"]):
+        return []
+    try:
+        resp = requests.get(
+            c["base_url"].rstrip("/") + "/models",
+            headers={"Authorization": f"Bearer {c['api_key']}"},
+            timeout=(5, 10))
+        resp.raise_for_status()
+        models = [item["id"] for item in resp.json().get("data", []) if item.get("id")]
+        return list(dict.fromkeys(models))
+    except (requests.RequestException, ValueError, KeyError):
+        return [c["model"]] if c["model"] else []
+
+
+def run(messages, tools=None, on_delta=None, model=None, reasoning_effort=""):
+    """一次对话调用，流式转发文本增量，返回 (最终文本, 工具调用列表)。"""
+    c = config(model)
     payload = {"model": c["model"], "messages": messages, "stream": True}
     if tools:
         payload["tools"] = tools
+    if reasoning_effort in ("low", "medium", "high"):
+        payload["reasoning_effort"] = reasoning_effort
     resp = requests.post(
         c["base_url"].rstrip("/") + "/chat/completions",
         headers={"Authorization": f"Bearer {c['api_key']}"},

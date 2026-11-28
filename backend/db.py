@@ -60,6 +60,18 @@ CREATE TABLE IF NOT EXISTS workflow_runs(
 CREATE TABLE IF NOT EXISTS drafts(
   id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, content TEXT, created_at TEXT);
 
+CREATE TABLE IF NOT EXISTS chat_attachments(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL, name TEXT, relative_path TEXT,
+  mime TEXT, size INTEGER, storage_key TEXT NOT NULL,
+  kind TEXT DEFAULT 'file', group_key TEXT DEFAULT '', created_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_chat_attachment_session ON chat_attachments(session_id, id);
+
+CREATE TABLE IF NOT EXISTS workspaces(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+  access TEXT DEFAULT 'read', created_at TEXT, updated_at TEXT);
+
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 
 CREATE TABLE IF NOT EXISTS sender_aliases(

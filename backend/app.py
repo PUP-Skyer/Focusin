@@ -10,7 +10,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 import pydantic
@@ -21,12 +21,22 @@ import db
 import dataset
 import feishu_oauth
 import ingest
+import llm
 import triage
+import uploads
+import workspace
 from connectors.email_imap import ATTACHMENT_DIR
 
 app = FastAPI(title="聚光 FocusIn")
-app.add_middleware(CORSMiddleware, allow_origins=["*"],
+app.add_middleware(CORSMiddleware,
+                    allow_origins=["http://127.0.0.1:5180", "http://localhost:5180"],
                     allow_methods=["*"], allow_headers=["*"])
+
+
+@app.get("/api/health")
+def health():
+    return {"ok": True, "service": "focusin"}
+
 
 GROUP_LABEL = triage.GROUPS
 _OAUTH_STATES = {}
@@ -228,6 +238,7 @@ def schedule():
         "FROM schedule_events e LEFT JOIN messages m ON m.id = e.source_msg_id "
         "WHERE e.status != 'dismissed' ORDER BY e.start_at ASC")
     for r in rows:
+        r["title"] = triage.event_title(r["title"], limit=80)
         r["source"] = None
         if r["src"]:
             r["source"] = {"id": r["source_msg_id"], "text": r["src"], "conv": r["src_conv"],
@@ -273,17 +284,119 @@ def chat_history(session_id: str = "legacy"):
     return db.chat_messages(session_id, 60)
 
 
+@app.get("/api/models")
+def model_catalog():
+    return {"models": llm.list_models(), "default": db.get_setting("llm_model", "")}
+
+
+class WorkspaceBody(pydantic.BaseModel):
+    path: str
+    access: str = "read"
+    confirm: bool = False
+
+
+class WorkspaceAccessBody(pydantic.BaseModel):
+    access: str
+    confirm: bool = False
+
+
+class WorkspaceChooseBody(pydantic.BaseModel):
+    confirm: bool = False
+
+
+class UploadDeleteBody(pydantic.BaseModel):
+    ids: list[int] = []
+    session_id: str = "legacy"
+
+
+@app.get("/api/workspaces")
+def list_workspaces():
+    return workspace.list_workspaces()
+
+
+@app.post("/api/workspaces/choose")
+def choose_workspace(body: WorkspaceChooseBody):
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="选择目录需要明确确认")
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail="当前运行环境不支持目录选择，请手动填写路径") from exc
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        selected = filedialog.askdirectory(parent=root, title="选择聚光本地工作目录", mustexist=True)
+    finally:
+        root.destroy()
+    return {"path": selected}
+
+
+@app.post("/api/workspaces")
+def add_workspace(body: WorkspaceBody):
+    if body.access not in ("read", "write"):
+        raise HTTPException(status_code=400, detail="无效的访问权限")
+    if body.access == "write" and not body.confirm:
+        raise HTTPException(status_code=400, detail="编辑权限需要明确确认")
+    try:
+        return workspace.grant_workspace(body.path, body.access)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/workspaces/{workspace_id}/access")
+def update_workspace_access(workspace_id: int, body: WorkspaceAccessBody):
+    if body.access not in ("read", "write"):
+        raise HTTPException(status_code=400, detail="无效的访问权限")
+    if body.access == "write" and not body.confirm:
+        raise HTTPException(status_code=400, detail="编辑权限需要明确确认")
+    row = workspace.set_access(workspace_id, body.access)
+    if not row:
+        raise HTTPException(status_code=404, detail="工作区不存在")
+    return row
+
+
+@app.post("/api/workspaces/{workspace_id}/delete")
+def delete_workspace(workspace_id: int):
+    workspace.remove_workspace(workspace_id)
+    return {"ok": True}
+
+
+@app.post("/api/chat/uploads")
+async def upload_chat_files(session_id: str = Form(...), files: list[UploadFile] = File(...)):
+    try:
+        return uploads.save_uploads(session_id, [(file.filename, file.file) for file in files])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/chat/uploads/delete")
+def delete_chat_uploads(body: UploadDeleteBody):
+    return {"ok": True, "deleted": uploads.delete_attachments(body.ids, body.session_id)}
+
+
 @app.post("/api/chat")
 async def chat(req: Request):
     body = await req.json()
     user_text = (body.get("message") or "").strip()
     session_id = str(body.get("session_id") or "legacy").strip()[:64] or "legacy"
-    if not user_text:
+    if not user_text and not body.get("attachment_ids"):
         return {"error": "empty message"}
+    user_text = user_text or "请查看我上传的附件。"
+    model = str(body.get("model") or "").strip()[:120]
+    reasoning_effort = str(body.get("reasoning_effort") or "").strip()
+    if reasoning_effort not in ("", "low", "medium", "high"):
+        reasoning_effort = ""
+    attachment_ids = [int(value) for value in body.get("attachment_ids") or []
+                      if str(value).isdigit()][:200]
     db.touch_chat_session(session_id, user_text)
 
     def gen():
-        for ev in agent.flow(user_text, session_id):
+        options = {"model": model, "reasoning_effort": reasoning_effort,
+                   "attachment_ids": attachment_ids}
+        for ev in agent.flow(user_text, session_id, options):
             yield json.dumps(ev, ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
@@ -346,6 +459,8 @@ def execute_workflow(workflow_id: str, run: WorkflowRun):
         steps.append({"name": "检查日程", "status": "done", "detail": "排除已忽略项"})
         data["schedule"] = db.q("SELECT * FROM schedule_events WHERE status != 'dismissed' "
                                 "ORDER BY start_at ASC LIMIT 8")
+        for event in data["schedule"]:
+            event["title"] = triage.event_title(event["title"], limit=80)
     if workflow_id == "daily_brief":
         steps.append({"name": "汇总待办", "status": "done", "detail": "仅统计未完成事项"})
         data["todos"] = db.q("SELECT * FROM todos WHERE done=0 ORDER BY id DESC LIMIT 8")

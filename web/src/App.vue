@@ -142,10 +142,13 @@ onMounted(() => {
   .topbar { gap: 10px; }
 }
 @media (max-width: 760px) {
+  .shell :deep(.side) { display: none; }
+  .main { width: 100%; }
   .topbar { padding-inline: 12px; }
   .top-right { gap: 6px; }
   .top-right .cap { padding-inline: 10px; }
   .bell { display: none; }
+  .page { padding: 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .cap { transition: none; }

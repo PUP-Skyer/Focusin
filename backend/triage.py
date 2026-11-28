@@ -2,6 +2,7 @@
 """智能分诊与日程时间提取（规则兜底版，无 LLM Key 时保证 Demo 可用）。"""
 import re
 import datetime
+from email.header import decode_header, make_header
 
 GROUPS = {"todo": "待办", "schedule": "日程", "notice": "通知",
            "important": "重要", "chatter": "闲聊"}
@@ -103,9 +104,22 @@ def classify(text, sender=""):
     return "chatter"
 
 
+def _clean_title_text(text):
+    try:
+        value = str(make_header(decode_header(str(text or ""))))
+    except (LookupError, UnicodeError, ValueError):
+        value = str(text or "")
+    value = value.replace("\\n", " ").replace("\x00", "").replace("\\", "")
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"^\s*\{?\s*['\"]title['\"]\s*:\s*['\"]", "", value, flags=re.I)
+    value = value.rstrip("\\ \t\r\n'\"}")
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def event_title(text, limit=24):
-    t = re.sub(r"\s+", " ", (text or "")).strip()
+    t = _clean_title_text(text)
     for drop in ("提醒一下：", "各位家长：", "【会议邀约】", "【通知】",
                  "提醒我", "帮我", "记得", "麻烦"):
         t = t.replace(drop, "")
+    t = t.strip() or "未命名事项"
     return (t[:limit] + "…") if len(t) > limit else t
